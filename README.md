@@ -6,6 +6,20 @@
 SOR/Bellcore для Windows. Читает открытый формат SOR, не требует установки
 и работает без интернета.
 
+## Скачать
+
+Готовые файлы — в разделе [Releases](https://github.com/TigerLD/openstv/releases/latest):
+
+| Файл | Назначение |
+|---|---|
+| `OpenSTV-1.3.2-win64.exe` | приложение с собственным окном Windows (основной вариант) |
+| `OpenSTV-1.3.2-browser.exe` | тот же интерфейс вкладкой в браузере |
+| `OpenSTV-cli-1.3.2.exe` | командная строка: inspect / export / csv / transform |
+
+Ничего устанавливать не нужно. Первый запуск оконной версии распаковывается
+в `%LOCALAPPDATA%\OpenSTV\1.3.2`; повторные запуски мгновенные.
+Файлы не подписаны, поэтому Windows SmartScreen может показать предупреждение.
+
 ## Возможности
 
 - [x] Формат SOR разобран и задокументирован — `notes/05-sor-format.md`
@@ -47,9 +61,9 @@ OTDR-трасс: Excel-отчёты по одной или всем трасса
 
 | Файл | Размер | SHA-256 |
 |---|---|---|
-| `desktop/dist/OpenSTV.exe` | 112 446 814 | `250DF8686002549AFFDF985C0F799D745AD080A3B5D89F4195E22C3951DE1EDE` |
-| `exporter/dist/OpenSTV.exe` | 96 715 776 | `916A7D5C06BABA8C6A63E11F6C296FF56BF1D691E79A34C621A0B6C07A6E86B5` |
-| `exporter/dist/OpenSTV-cli.exe` | 96 715 776 | `702B01DBAFA2AD3E0BD47716FE2A6C82AE4DE3C29959A10E69B1E69FE726C46F` |
+| `OpenSTV-1.3.2-win64.exe` | 112 417 375 | `32CD9C5F8A381E7D2FD00CDB1996960E91D41713805583982C41464951231564` |
+| `OpenSTV-1.3.2-browser.exe` | 96 715 776 | `BE8644B496070DD864FB04CBC6C2820AC0113063EB37C56D824D3D96F8B17DB4` |
+| `OpenSTV-cli-1.3.2.exe` | 96 715 776 | `A7152D41C084A4877CE351766524848684795218D68DB86019CF81C34F2403DE` |
 
 ### Оконное приложение (Electron)
 
