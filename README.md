@@ -252,3 +252,7 @@ node .\build.mjs --package  # + dist\OpenSTV.exe
 - `notes/07-openstv-desktop.md` — оконное приложение на Electron: архитектура и сборка.
 - `notes/08-feature-gaps.md` — возможности OpenSTV и что ещё можно добавить.
 - `notes/09-tst-format.md` — разбор формата Fluke `.tst` и вывод по образцу.
+
+## Лицензия
+
+MIT. См. [LICENSE](LICENSE).

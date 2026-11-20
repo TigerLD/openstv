@@ -1,9 +1,10 @@
 {
   "name": "openstv",
-  "version": "1.0.0",
+  "version": "1.3.2",
   "private": true,
   "type": "module",
   "description": "OpenSTV — batch export and batch editing for OTDR traces (SOR)",
+  "license": "MIT",
   "scripts": {
     "build": "node build.mjs",
     "inspect": "node cli.mjs inspect",

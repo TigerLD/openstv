@@ -4,6 +4,7 @@
   "private": true,
   "description": "OpenSTV — пакетная обработка OTDR-трасс (SOR)",
   "author": "OpenSTV",
+  "license": "MIT",
   "main": "app/main.cjs",
   "scripts": {
     "build": "node build.mjs",
