@@ -1,0 +1,45 @@
+{
+  "name": "openstv-desktop",
+  "version": "1.3.2",
+  "private": true,
+  "description": "OpenSTV — пакетная обработка OTDR-трасс (SOR)",
+  "author": "OpenSTV",
+  "main": "app/main.cjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "package": "node build.mjs --package",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "45.3.3",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.10"
+  },
+  "build": {
+    "appId": "ru.openstv.app",
+    "productName": "OpenSTV",
+    "directories": {
+      "output": "build/out",
+      "buildResources": "app"
+    },
+    "files": [
+      "app/main.cjs",
+      "app/icon.ico",
+      "package.json"
+    ],
+    "asar": true,
+    "compression": "maximum",
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "app/icon.ico",
+      "executableName": "OpenSTV"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "openstv",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenSTV — batch export and batch editing for OTDR traces (SOR)",
+  "scripts": {
+    "build": "node build.mjs",
+    "inspect": "node cli.mjs inspect",
+    "export": "node cli.mjs export",
+    "csv": "node cli.mjs csv",
+    "transform": "node cli.mjs transform"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.10",
+    "postject": "^1.0.0-alpha.6"
+  }
+}
