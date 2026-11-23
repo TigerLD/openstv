@@ -85,4 +85,11 @@ test("API reads only paths selected by the user", async (t) => {
     body: JSON.stringify({ file: join(dirname(fixtures), "..", "package.json") }),
   });
   assert.equal(outside.status, 403);
+
+  const tooMany = await fetch(`${base}/api/export`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-openstv-token": token },
+    body: JSON.stringify({ type: "csv", files: Array.from({ length: 1001 }, (_, i) => `f${i}.sor`), out: join(fixtures, "x.csv") }),
+  });
+  assert.equal(tooMany.status, 413);
 });

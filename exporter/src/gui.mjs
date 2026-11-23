@@ -22,6 +22,14 @@ import { readTraceData, readTraceEvents, rewriteSor, updateSor } from "./writer.
 
 const VERSION = "1.3.2";
 const SOL_KM_PER_US = 0.299792458;
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_FILES = 1000;
+
+function tooManyFiles(res, files) {
+  if (files.length <= MAX_FILES) return false;
+  sendJson(res, 413, { error: `слишком много файлов (${files.length}), максимум ${MAX_FILES}` });
+  return true;
+}
 
 const PAGE = `<!doctype html>
 <html lang="ru">
@@ -1735,7 +1743,7 @@ function readJson(req) {
     const chunks = [];
     req.on("data", (c) => {
       size += c.length;
-      if (size > 32 * 1024 * 1024) {
+      if (size > MAX_REQUEST_BYTES) {
         reject(new Error("слишком большой запрос"));
         req.destroy();
         return;
@@ -2009,6 +2017,7 @@ async function handle(req, res, opts = {}) {
     if (files.length === 0) {
       return sendJson(res, 200, { rows: [], total: 0, events: 0, errors: [], suggest: null });
     }
+    if (tooManyFiles(res, files)) return;
     const entries = loadEntries(files);
     const rows = [];
     const errors = [];
@@ -2041,6 +2050,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (tooManyFiles(res, files)) return;
     if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
@@ -2069,6 +2079,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (tooManyFiles(res, files)) return;
     if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const outDir = String(body.outDir ?? "").trim();
     if (!outDir) return sendJson(res, 400, { error: "не указана папка результата" });
@@ -2520,6 +2531,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (tooManyFiles(res, files)) return;
     if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
@@ -2537,6 +2549,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (tooManyFiles(res, files)) return;
     if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
@@ -2629,6 +2642,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (tooManyFiles(res, files)) return;
     if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const outDir = String(body.outDir ?? "").trim();
     if (!outDir) return sendJson(res, 400, { error: "не указана папка результата" });
