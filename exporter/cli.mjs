@@ -151,17 +151,22 @@ async function cmdTransform(files, flags) {
 }
 
 const PORT_FILE = join(tmpdir(), "openstv.port");
+const TOKEN_FILE = join(tmpdir(), "openstv.token");
 
 async function findRunningInstance() {
   try {
     const port = Number(readFileSync(PORT_FILE, "utf8").trim());
-    if (!Number.isInteger(port) || port <= 0) return null;
+    const token = readFileSync(TOKEN_FILE, "utf8").trim();
+    if (!Number.isInteger(port) || port <= 0 || !token) return null;
     const url = `http://127.0.0.1:${port}/`;
-    const r = await fetch(`${url}api/ping`, { signal: AbortSignal.timeout(600) });
+    const r = await fetch(`${url}api/ping`, {
+      headers: { "x-openstv-token": token },
+      signal: AbortSignal.timeout(600),
+    });
     if (!r.ok) return null;
     const info = await r.json().catch(() => null);
     if (!info || !info.ok) return null;
-    return url;
+    return { url, token };
   } catch {
     return null;
   }
@@ -174,15 +179,17 @@ async function cmdGui(flags) {
   if (port === 0) {
     const running = await findRunningInstance();
     if (running) {
-      if (flags["no-browser"] !== true) openBrowserUrl(running);
-      console.log(`OpenSTV уже запущен: ${running}`);
+      const url = `${running.url}?token=${running.token}`;
+      if (flags["no-browser"] !== true) openBrowserUrl(url);
+      console.log(`OpenSTV уже запущен: ${url}`);
       return;
     }
   }
 
-  const { url } = await startGui({ port, openBrowser: flags["no-browser"] !== true });
+  const { url, token } = await startGui({ port, openBrowser: flags["no-browser"] !== true });
   try {
     writeFileSync(PORT_FILE, String(new URL(url).port), "utf8");
+    writeFileSync(TOKEN_FILE, token, "utf8");
   } catch {
     // Not critical: only affects reuse of a running instance.
   }

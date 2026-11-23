@@ -66,6 +66,10 @@ function createWindow(url) {
     if (/^https?:/i.test(target)) shell.openExternal(target);
     return { action: "deny" };
   });
+  // The UI needs no camera/microphone/notifications; deny every permission.
+  win.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  win.webContents.session.setPermissionCheckHandler(() => false);
+  win.webContents.on("will-attach-webview", (event) => event.preventDefault());
 
   win.loadURL(url);
   return win;
@@ -83,6 +87,7 @@ async function boot() {
   // Diagnostics: lets tools (and the CLI) find the running instance.
   try {
     writeFileSync(join(tmpdir(), "openstv.port"), port, "utf8");
+    writeFileSync(join(tmpdir(), "openstv.token"), started.token, "utf8");
   } catch {
     // not critical
   }

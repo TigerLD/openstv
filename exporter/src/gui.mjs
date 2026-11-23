@@ -1,8 +1,9 @@
 // Local graphical shell: a tiny HTTP server + browser UI (no external deps).
 import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   collect,
   exportCsv,
@@ -397,7 +398,7 @@ const PAGE = `<!doctype html>
         <option value="pte-8">ВОЛС-ПТЭ-8 — приёмка участка</option>
       </select>
       <div class="row" style="margin-top:4px"><input id="protoOrg" placeholder="Организация"><input id="protoObject" placeholder="Объект / участок"></div>
-      <div class="row" style="margin-top:4px"><input id="protoCable" placeholder="Кабель"><input id="protoNorm" placeholder="Норма, дБ/км" value="0.35" style="width:130px"><span class="hint">дБ/км</span></div>
+      <div class="row" style="margin-top:4px"><input id="protoCable" placeholder="Кабель"><input id="protoNorm" placeholder="задать по норме" style="width:150px"><span class="hint">дБ/км</span></div>
       <div class="row" style="margin-top:4px"><input id="protoOut" placeholder="protocol.html"><button class="ghost" data-pick="protoOut">…</button></div>
       <button class="wide" id="doProtocol">Создать протокол</button>
     </div>
@@ -456,8 +457,9 @@ const PAGE = `<!doctype html>
 </div>
 
 <div id="printArea"></div>
-<script>
+<script nonce="__NONCE__">
 var rows = [], selected = new Set();
+var TOKEN = new URLSearchParams(location.search).get("token") || "";
 function $(s) { return document.querySelector(s); }
 function log(msg, cls) {
   var p = $("#log"), d = document.createElement("div");
@@ -471,7 +473,7 @@ function busy(on) {
   document.body.classList.toggle("busy", on);
 }
 async function api(path, body) {
-  var r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+  var r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-openstv-token": TOKEN }, body: JSON.stringify(body || {}) });
   var j = {};
   try { j = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
@@ -1471,7 +1473,7 @@ $("#browseFiles").addEventListener("click", async function () {
 $("#dir").addEventListener("input", function () { pickedFiles = null; });
 
 async function quitApp() {
-  try { await fetch("/api/quit", { method: "POST" }); } catch (e) {}
+  try { await fetch("/api/quit", { method: "POST", headers: { "x-openstv-token": TOKEN } }); } catch (e) {}
   document.body.innerHTML = '<div style="padding:48px;font:16px system-ui,sans-serif;color:#1b2430">OpenSTV остановлен. Это окно можно закрыть.</div>';
 }
 
@@ -1687,13 +1689,44 @@ loadSettings();
 </body>
 </html>`;
 
-function send(res, code, type, body) {
-  res.writeHead(code, { "content-type": type, "cache-control": "no-store" });
+function send(res, code, type, body, headers = {}) {
+  res.writeHead(code, {
+    "content-type": type,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    ...headers,
+  });
   res.end(body);
 }
 
 function sendJson(res, code, obj) {
   send(res, code, "application/json; charset=utf-8", JSON.stringify(obj));
+}
+
+// Only paths chosen by the user (file dialogs, typed folder, opened traces) are
+// readable/writable through the local API.
+function normPath(p) {
+  const abs = resolve(String(p));
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
+function allowPath(allowed, p) {
+  if (allowed && p) allowed.add(normPath(p));
+}
+function isInside(root, abs) {
+  return abs === root || abs.startsWith(root + sep);
+}
+function isAllowed(allowed, p) {
+  if (!allowed || allowed.size === 0) return false;
+  const abs = normPath(p);
+  for (const root of allowed) {
+    if (isInside(root, abs)) return true;
+  }
+  return false;
+}
+function denyPath(res) {
+  sendJson(res, 403, { error: "путь вне выбранных папок" });
+  return false;
 }
 
 function readJson(req) {
@@ -1898,10 +1931,29 @@ function tracePayload(rawFile) {
 }
 
 async function handle(req, res, opts = {}) {
+  const port = req.socket.localPort;
+  const host = String(req.headers.host ?? "");
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+    return sendJson(res, 403, { error: "forbidden host" });
+  }
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) {
+    return sendJson(res, 403, { error: "forbidden origin" });
+  }
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  if (url.pathname.startsWith("/api/") && opts.token) {
+    const given = req.headers["x-openstv-token"] || url.searchParams.get("token");
+    if (given !== opts.token) return sendJson(res, 401, { error: "unauthorized" });
+  }
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-    return send(res, 200, "text/html; charset=utf-8", PAGE.replaceAll("__VERSION__", VERSION));
+    const nonce = randomBytes(16).toString("base64");
+    const html = PAGE.replaceAll("__VERSION__", VERSION).replaceAll("__NONCE__", nonce);
+    return send(res, 200, "text/html; charset=utf-8", html, {
+      "content-security-policy":
+        `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; ` +
+        "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    });
   }
   if (req.method === "GET" && url.pathname === "/favicon.ico") {
     res.writeHead(204);
@@ -1932,6 +1984,7 @@ async function handle(req, res, opts = {}) {
     let base;
     if (picked.length) {
       files = picked;
+      files.forEach((f) => allowPath(opts.allowed, f));
       base = dirname(files[0]);
     } else {
       const dir = String(body.dir ?? "").trim();
@@ -1945,9 +1998,12 @@ async function handle(req, res, opts = {}) {
       if (!st.isDirectory()) {
         files = [resolve(dir)];
         base = dirname(files[0]);
+        allowPath(opts.allowed, files[0]);
       } else {
         files = collect([dir], { recursive: body.recursive !== false });
         base = resolve(dir).replace(/[\\/]+$/, "");
+        allowPath(opts.allowed, base);
+        files.forEach((f) => allowPath(opts.allowed, f));
       }
     }
     if (files.length === 0) {
@@ -1985,6 +2041,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
     const skipped = entries.filter((e) => e.error).map((e) => ({ file: e.path, error: e.error }));
@@ -1993,6 +2050,7 @@ async function handle(req, res, opts = {}) {
     const type = body.type === "csv" ? "csv" : "xlsx";
     const fallback = join(resolve(files[0] ?? ".").replace(/[\\/][^\\/]+$/, ""), type === "csv" ? "events.csv" : "report.xlsx");
     const out = String(body.out ?? "").trim() || fallback;
+    if (!isAllowed(opts.allowed, dirname(resolve(out)))) return denyPath(res);
     try {
       mkdirSync(dirname(resolve(out)), { recursive: true });
     } catch (e) {
@@ -2011,8 +2069,10 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const outDir = String(body.outDir ?? "").trim();
     if (!outDir) return sendJson(res, 400, { error: "не указана папка результата" });
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
 
     let dateTs;
     if (body.date) {
@@ -2048,6 +2108,7 @@ async function handle(req, res, opts = {}) {
 
   if (req.method === "POST" && url.pathname === "/api/trace") {
     const body = await readJson(req);
+    if (!body.file || !isAllowed(opts.allowed, body.file)) return denyPath(res);
     try {
       return sendJson(res, 200, tracePayload(String(body.file ?? "")));
     } catch (e) {
@@ -2057,6 +2118,8 @@ async function handle(req, res, opts = {}) {
 
   if (req.method === "POST" && url.pathname === "/api/bidir") {
     const body = await readJson(req);
+    if (!body.file || !isAllowed(opts.allowed, body.file)) return denyPath(res);
+    if (!body.backFile || !isAllowed(opts.allowed, body.backFile)) return denyPath(res);
     try {
       const front = tracePayload(String(body.file ?? ""));
       const back = tracePayload(String(body.backFile ?? ""));
@@ -2104,6 +2167,7 @@ async function handle(req, res, opts = {}) {
     const raw = String(body.file ?? "").trim();
     if (!raw) return sendJson(res, 400, { error: "не указан файл" });
     const file = resolve(raw);
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     let buf;
     try {
       buf = readFileSync(file);
@@ -2150,6 +2214,7 @@ async function handle(req, res, opts = {}) {
     }
 
     const outDir = text(body.outDir) ? resolve(text(body.outDir)) : dirname(file);
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     try {
       mkdirSync(outDir, { recursive: true });
     } catch (e) {
@@ -2171,6 +2236,7 @@ async function handle(req, res, opts = {}) {
     const raw = String(body.file ?? "").trim();
     if (!raw) return sendJson(res, 400, { error: "не указан файл" });
     const file = resolve(raw);
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     let target = file;
     try {
       if (!statSync(file).isFile()) target = dirname(file);
@@ -2192,6 +2258,7 @@ async function handle(req, res, opts = {}) {
   if (req.method === "POST" && url.pathname === "/api/crop") {
     const body = await readJson(req);
     const file = resolve(String(body.file ?? "").trim());
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     if (!file) return sendJson(res, 400, { error: "не указан файл" });
     let buf;
     try {
@@ -2262,6 +2329,7 @@ async function handle(req, res, opts = {}) {
     }
 
     const outDir = String(body.outDir ?? "").trim() ? resolve(String(body.outDir).trim()) : dirname(file);
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     mkdirSync(outDir, { recursive: true });
     const stem = sourceStem(file);
     const target = join(outDir, `${stem}_crop.sor`);
@@ -2278,6 +2346,7 @@ async function handle(req, res, opts = {}) {
   if (req.method === "POST" && url.pathname === "/api/denoise") {
     const body = await readJson(req);
     const file = resolve(String(body.file ?? "").trim());
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     if (!file) return sendJson(res, 400, { error: "не указан файл" });
     let buf;
     try {
@@ -2330,6 +2399,7 @@ async function handle(req, res, opts = {}) {
       return sendJson(res, 400, { error: `не удалось пересобрать файл: ${e.message}` });
     }
     const outDir = String(body.outDir ?? "").trim() ? resolve(String(body.outDir).trim()) : dirname(file);
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     mkdirSync(outDir, { recursive: true });
     const stem = sourceStem(file);
     const target = join(outDir, `${stem}_smooth.sor`);
@@ -2346,6 +2416,7 @@ async function handle(req, res, opts = {}) {
   if (req.method === "POST" && url.pathname === "/api/event") {
     const body = await readJson(req);
     const file = resolve(String(body.file ?? "").trim());
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     if (!file) return sendJson(res, 400, { error: "не указан файл" });
     let buf;
     try {
@@ -2437,6 +2508,7 @@ async function handle(req, res, opts = {}) {
       return sendJson(res, 400, { error: `не удалось пересобрать файл: ${e.message}` });
     }
     const outDir = String(body.outDir ?? "").trim() ? resolve(String(body.outDir).trim()) : dirname(file);
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     mkdirSync(outDir, { recursive: true });
     const stem = sourceStem(file);
     const target = join(outDir, `${stem}_events.sor`);
@@ -2448,6 +2520,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
     if (models.length === 0) return sendJson(res, 400, { error: "не удалось прочитать ни одной трассы" });
@@ -2455,6 +2528,7 @@ async function handle(req, res, opts = {}) {
     const eventB = Math.max(eventA + 1, Number(body.eventB) || 2);
     const out = String(body.out ?? "").trim() ||
       join(resolve(files[0] ?? ".").replace(/[\\/][^\\/]+$/, ""), "span_report.xlsx");
+    if (!isAllowed(opts.allowed, dirname(resolve(out)))) return denyPath(res);
     const abs = await writeSpanReport(out, models, { eventA, eventB });
     return sendJson(res, 200, { out: abs, traces: models.length, eventA, eventB });
   }
@@ -2463,11 +2537,13 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const entries = loadEntries(files);
     const models = entries.filter((e) => e.model).map((e) => e.model);
     if (models.length === 0) return sendJson(res, 400, { error: "не удалось прочитать ни одной трассы" });
     const out = String(body.out ?? "").trim() ||
       join(resolve(files[0] ?? ".").replace(/[\\/][^\\/]+$/, ""), "protocol.html");
+    if (!isAllowed(opts.allowed, dirname(resolve(out)))) return denyPath(res);
     try {
       writeProtocol(out, models, {
         kind: body.kind,
@@ -2487,6 +2563,7 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const outDir = String(body.outDir ?? "").trim();
     if (!outDir) return sendJson(res, 400, { error: "не указана папка результата" });
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     const rangeM = Number(body.rangeM);
     if (!isFinite(rangeM) || rangeM < 10 || rangeM > 500000) {
       return sendJson(res, 400, { error: "длина трассы должна быть от 10 м до 500 км" });
@@ -2552,8 +2629,10 @@ async function handle(req, res, opts = {}) {
     const body = await readJson(req);
     const files = Array.isArray(body.files) ? body.files.map(String) : [];
     if (files.length === 0) return sendJson(res, 400, { error: "не выбраны файлы" });
+    if (!files.every((f) => isAllowed(opts.allowed, f))) return denyPath(res);
     const outDir = String(body.outDir ?? "").trim();
     if (!outDir) return sendJson(res, 400, { error: "не указана папка результата" });
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     const ior = body.ior !== undefined && String(body.ior).trim() ? Number(String(body.ior).replace(",", ".")) : undefined;
     if (ior !== undefined && (!isFinite(ior) || ior < 1 || ior > 2)) {
       return sendJson(res, 400, { error: "показатель преломления должен быть в диапазоне 1.0…2.0" });
@@ -2589,6 +2668,7 @@ async function handle(req, res, opts = {}) {
   if (req.method === "POST" && url.pathname === "/api/setpoint") {
     const body = await readJson(req);
     const file = resolve(String(body.file ?? "").trim());
+    if (!isAllowed(opts.allowed, file)) return denyPath(res);
     if (!file) return sendJson(res, 400, { error: "не указан файл" });
     let buf;
     try {
@@ -2629,6 +2709,7 @@ async function handle(req, res, opts = {}) {
 
     const out = rewriteSor(buf, { data: { ...data, raw } });
     const outDir = String(body.outDir ?? "").trim() ? resolve(String(body.outDir).trim()) : dirname(file);
+    if (!isAllowed(opts.allowed, outDir)) return denyPath(res);
     mkdirSync(outDir, { recursive: true });
     const stem = sourceStem(file);
     const target = join(outDir, `${stem}_visual.sor`);
@@ -2644,11 +2725,15 @@ async function handle(req, res, opts = {}) {
     if (kind === "files") {
       const filter = "Трассы (*.sor;*.msor;*.csor;*.trc)|*.sor;*.msor;*.csor;*.trc|Все файлы (*.*)|*.*";
       const out = pickOpenFile(title, initial, filter, true);
-      return sendJson(res, 200, { paths: out ? out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [] });
+      const paths = out ? out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
+      paths.forEach((p) => allowPath(opts.allowed, p));
+      return sendJson(res, 200, { paths });
     }
     if (kind === "open") {
       const filter = "Трассы (*.sor;*.msor;*.csor;*.trc)|*.sor;*.msor;*.csor;*.trc|Все файлы (*.*)|*.*";
-      return sendJson(res, 200, { path: pickOpenFile(title, initial, filter) });
+      const picked = pickOpenFile(title, initial, filter);
+      if (picked) allowPath(opts.allowed, picked);
+      return sendJson(res, 200, { path: picked });
     }
     if (kind === "save") {
       const filter = /\.csv$/i.test(initial)
@@ -2656,9 +2741,16 @@ async function handle(req, res, opts = {}) {
         : /\.html?$/i.test(initial)
           ? "HTML-документ (*.html)|*.html|Все файлы (*.*)|*.*"
           : "Excel (*.xlsx)|*.xlsx|Все файлы (*.*)|*.*";
-      return sendJson(res, 200, { path: pickSaveFile(title, initial, filter) });
+      const picked = pickSaveFile(title, initial, filter);
+      if (picked) {
+        allowPath(opts.allowed, picked);
+        allowPath(opts.allowed, dirname(picked));
+      }
+      return sendJson(res, 200, { path: picked });
     }
-    return sendJson(res, 200, { path: pickFolder(title, initial) });
+    const folder = pickFolder(title, initial);
+    if (folder) allowPath(opts.allowed, folder);
+    return sendJson(res, 200, { path: folder });
   }
 
   return sendJson(res, 404, { error: "not found" });
@@ -2674,9 +2766,11 @@ function openUrl(url) {
 
 export { openUrl as openBrowserUrl };
 
-export function startGui({ port = 0, openBrowser = true, onQuit } = {}) {
+export function startGui({ port = 0, openBrowser = true, onQuit, token } = {}) {
+  const secret = token || randomBytes(16).toString("hex");
+  const allowed = new Set();
   const server = createServer((req, res) => {
-    handle(req, res, { onQuit }).catch((e) => {
+    handle(req, res, { onQuit, token: secret, allowed }).catch((e) => {
       try {
         sendJson(res, 500, { error: e?.message ?? String(e) });
       } catch {
@@ -2689,9 +2783,9 @@ export function startGui({ port = 0, openBrowser = true, onQuit } = {}) {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => {
       const actual = server.address().port;
-      const url = `http://127.0.0.1:${actual}/`;
+      const url = `http://127.0.0.1:${actual}/?token=${secret}`;
       if (openBrowser) openUrl(url);
-      resolvePromise({ url, server, close: () => new Promise((r) => server.close(() => r())) });
+      resolvePromise({ url, token: secret, server, close: () => new Promise((r) => server.close(() => r())) });
     });
   });
 }
