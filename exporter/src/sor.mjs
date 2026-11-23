@@ -4,7 +4,16 @@
 
 import { cp1251Decode } from "./cp1251.mjs";
 
-const SOL_KM_PER_US = 0.299792458; // speed of light, km per microsecond (round trip handled by /2)
+const SOL_KM_PER_US = 0.299792458; // speed of light, km per microsecond
+const MAX_POINTS = 5_000_000; // sanity limit for DataPts (10 MB of samples)
+const MAX_BLOCKS = 1024;
+
+export class SorError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SorError";
+  }
+}
 
 function crc16ccitt(buf) {
   let crc = 0xffff;
@@ -21,50 +30,73 @@ class Reader {
   constructor(buf, offset = 0) {
     this.buf = buf;
     this.pos = offset;
+    this.limit = buf.length;
   }
   seek(p) { this.pos = p; return this; }
+  setLimit(p) { this.limit = Math.max(0, Math.min(p, this.buf.length)); return this; }
   tell() { return this.pos; }
-  u8() { const v = this.buf[this.pos]; this.pos += 1; return v; }
-  u16() { const v = this.buf.readUInt16LE(this.pos); this.pos += 2; return v; }
-  i16() { const v = this.buf.readInt16LE(this.pos); this.pos += 2; return v; }
-  u32() { const v = this.buf.readUInt32LE(this.pos); this.pos += 4; return v; }
-  i32() { const v = this.buf.readInt32LE(this.pos); this.pos += 4; return v; }
-  bytes(n) { const v = this.buf.subarray(this.pos, this.pos + n); this.pos += n; return v; }
+  need(n) {
+    if (this.pos + n > this.limit) {
+      throw new SorError(`неожиданный конец данных: нужно ${n} байт, доступно ${Math.max(0, this.limit - this.pos)}`);
+    }
+  }
+  u8() { this.need(1); const v = this.buf[this.pos]; this.pos += 1; return v; }
+  u16() { this.need(2); const v = this.buf.readUInt16LE(this.pos); this.pos += 2; return v; }
+  i16() { this.need(2); const v = this.buf.readInt16LE(this.pos); this.pos += 2; return v; }
+  u32() { this.need(4); const v = this.buf.readUInt32LE(this.pos); this.pos += 4; return v; }
+  i32() { this.need(4); const v = this.buf.readInt32LE(this.pos); this.pos += 4; return v; }
+  bytes(n) { this.need(n); const v = this.buf.subarray(this.pos, this.pos + n); this.pos += n; return v; }
   cstr() {
     const start = this.pos;
-    while (this.pos < this.buf.length && this.buf[this.pos] !== 0) this.pos++;
+    while (this.pos < this.limit && this.buf[this.pos] !== 0) this.pos++;
     const s = cp1251Decode(this.buf.subarray(start, this.pos));
-    if (this.pos < this.buf.length) this.pos++;
+    if (this.pos < this.limit) this.pos++;
     return s;
   }
-  remaining() { return this.buf.length - this.pos; }
+  remaining() { return this.limit - this.pos; }
 }
 
 // v2 Map: "Map\0" + u16 version + u16 totalSize + u32 mapBytes + u16 totalBlocks - 1
 // then per block: name\0 + u16 version + u32 size. Body follows after the map block.
 function readMap(buf) {
-  const r = new Reader(buf, 0);
-  const name = r.cstr();
-  const version = r.u16();
-  const totalSize = r.u32();
-  if (name !== "Map") return { format: 1 };
-  const count = r.u16() - 1;
-  const entries = [];
-  for (let i = 0; i < count; i++) {
-    const bname = r.cstr();
-    const bver = r.u16();
-    const bsize = r.u32();
-    entries.push({ name: bname, version: bver, size: bsize });
+  try {
+    const r = new Reader(buf, 0);
+    const name = r.cstr();
+    const version = r.u16();
+    const totalSize = r.u32();
+    if (name !== "Map") return { format: 1 };
+    if (totalSize < 12 || totalSize > buf.length) {
+      throw new SorError(`Map: некорректный размер ${totalSize}`);
+    }
+    const count = r.u16() - 1;
+    if (count < 0 || count > MAX_BLOCKS) {
+      throw new SorError(`Map: некорректное число блоков ${count + 1}`);
+    }
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const bname = r.cstr();
+      const bver = r.u16();
+      const bsize = r.u32();
+      if (!bname) throw new SorError("Map: пустое имя блока");
+      entries.push({ name: bname, version: bver, size: bsize });
+    }
+    const blocks = {};
+    let start = totalSize;
+    for (const e of entries) {
+      if (e.size < e.name.length + 1) {
+        throw new SorError(`Map: блок ${e.name} короче своего имени`);
+      }
+      if (start + e.size > buf.length) {
+        throw new SorError(`Map: блок ${e.name} выходит за конец файла`);
+      }
+      blocks[e.name] = { ...e, start, dataStart: start + e.name.length + 1 };
+      start += e.size;
+    }
+    return { format: 2, totalSize, entries, blocks };
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`Map: ${e.message}`);
   }
-  const blocks = {};
-  let start = 0;
-  // First block starts at totalSize (map block full size).
-  start = totalSize;
-  for (const e of entries) {
-    blocks[e.name] = { ...e, start, dataStart: start + e.name.length + 1 };
-    start += e.size;
-  }
-  return { format: 2, totalSize, entries, blocks };
 }
 
 // v1: sequential blocks, each "Name\0" + u16 size? In practice v1 blocks are
@@ -75,20 +107,28 @@ function readV1Blocks(buf) {
   const blocks = {};
   let start = 0;
   const r = new Reader(buf, 0);
-  for (const expected of names) {
-    r.seek(start);
-    const name = r.cstr();
-    if (name !== expected) break;
-    const version = r.u16();
-    const size = r.u16();
-    blocks[name] = { name, version, size, start, dataStart: r.tell() };
-    start += size;
+  try {
+    for (const expected of names) {
+      r.seek(start);
+      const name = r.cstr();
+      if (name !== expected) break;
+      const version = r.u16();
+      const size = r.u16();
+      if (size < name.length + 1 || start + size > buf.length) {
+        throw new SorError(`v1: блок ${name} выходит за конец файла`);
+      }
+      blocks[name] = { name, version, size, start, dataStart: r.tell() };
+      start += size;
+    }
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`v1: ${e.message}`);
   }
   return { format: 1, blocks };
 }
 
 function parseGenParams(r, block) {
-  r.seek(block.dataStart);
+  r.seek(block.dataStart).setLimit(block.start + block.size);
   const g = {};
   g.language = r.bytes(2).toString("latin1").replace(/\0/g, "");
   g.cableId = r.cstr();
@@ -109,7 +149,7 @@ function parseGenParams(r, block) {
 }
 
 function parseSupParams(r, block) {
-  r.seek(block.dataStart);
+  r.seek(block.dataStart).setLimit(block.start + block.size);
   return {
     supplier: r.cstr(),
     otdr: r.cstr(),
@@ -122,7 +162,7 @@ function parseSupParams(r, block) {
 }
 
 function parseFxdParams(r, block, format) {
-  r.seek(block.dataStart);
+  r.seek(block.dataStart).setLimit(block.start + block.size);
   const f = {};
   f.timestamp = r.u32();
   f.date = new Date(f.timestamp * 1000);
@@ -157,18 +197,23 @@ function parseFxdParams(r, block, format) {
     f.x1 = r.i32(); f.y1 = r.i32(); f.x2 = r.i32(); f.y2 = r.i32();
   }
   // Two-way propagation: dz = c * dt / (2 * n)
+  if (!(f.indexOfRefraction > 0)) throw new SorError("FxdParams: некорректный показатель преломления");
+  if (!(f.sampleSpacingUs > 0)) throw new SorError("FxdParams: некорректный шаг дискретизации");
+  if (!(f.numDataPoints > 0)) throw new SorError("FxdParams: нулевое число точек");
+  if (f.numDataPoints > MAX_POINTS) throw new SorError(`FxdParams: слишком много точек (${f.numDataPoints})`);
   f.resolutionM = (f.sampleSpacingUs * SOL_KM_PER_US / f.indexOfRefraction) * 1000;
   f.rangeM = f.resolutionM * f.numDataPoints;
   return f;
 }
 
 function parseKeyEvents(r, block, fxd, format) {
-  r.seek(block.dataStart);
+  r.seek(block.dataStart).setLimit(block.start + block.size);
   const n = r.u16();
   const events = [];
   // distance is time-of-flight in 0.1 ns units
   const distFactorKm = 1e-4 * SOL_KM_PER_US / fxd.indexOfRefraction;
   for (let i = 0; i < n; i++) {
+    if (r.remaining() < 22) throw new SorError(`KeyEvents: событие ${i + 1} обрезано`);
     const number = r.u16();
     const distanceRaw = r.u32();
     const slope = r.i16() * 1e-3;
@@ -185,6 +230,7 @@ function parseKeyEvents(r, block, fxd, format) {
       type: decodeEventType(typeRaw),
     };
     if (format === 2) {
+      if (r.remaining() < 20) throw new SorError(`KeyEvents: событие ${i + 1} обрезано (нет полей v2)`);
       ev.endOfPreviousM = r.u32() * distFactorKm * 1000;
       ev.startOfCurrentM = r.u32() * distFactorKm * 1000;
       ev.endOfCurrentM = r.u32() * distFactorKm * 1000;
@@ -225,11 +271,14 @@ function decodeEventType(raw) {
 }
 
 function parseDataPts(r, block, fxd) {
-  r.seek(block.dataStart);
+  r.seek(block.dataStart).setLimit(block.start + block.size);
   const n = r.u32();
+  if (n === 0) throw new SorError("DataPts: нет точек");
+  if (n > MAX_POINTS) throw new SorError(`DataPts: слишком много точек (${n})`);
   const numTraces = r.i16();
   const n2 = r.u32();
   const scaleRaw = r.u16();
+  if (12 + n * 2 > block.size) throw new SorError("DataPts: массив точек выходит за пределы блока");
   // SR-4731: scale factor = counts per dB (1000 => 0.001 dB per count).
   const countsPerDb = scaleRaw > 0 ? scaleRaw : 1000;
   const scale = 1 / countsPerDb;
@@ -244,32 +293,41 @@ function parseDataPts(r, block, fxd) {
   }
   const points = new Float64Array(n);
   for (let i = 0; i < n; i++) points[i] = (ref - raw[i]) * scale;
-  return { n, numTraces, n2, scale, countsPerDb, ref, raw, points };
+  return { n, numTraces, n2, n2Mismatch: n2 !== n, scale, countsPerDb, ref, raw, points };
 }
 
 export function parseSor(buffer) {
-  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-  const map = readMap(buf);
-  const blocks = map.format === 2 ? map.blocks : readV1Blocks(buf).blocks;
-  const format = map.format;
-  if (!blocks.FxdParams) throw new Error("not a SOR file: FxdParams block not found");
+  try {
+    const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    const map = readMap(buf);
+    const blocks = map.format === 2 ? map.blocks : readV1Blocks(buf).blocks;
+    const format = map.format;
+    if (!blocks.FxdParams) throw new SorError("не SOR: блок FxdParams не найден");
 
-  const r = new Reader(buf, 0);
-  const gen = blocks.GenParams ? parseGenParams(r, blocks.GenParams) : null;
-  const sup = blocks.SupParams ? parseSupParams(r, blocks.SupParams) : null;
-  const fxd = parseFxdParams(r, blocks.FxdParams, format);
-  const keyEvents = blocks.KeyEvents ? parseKeyEvents(r, blocks.KeyEvents, fxd, format) : { count: 0, events: [], summary: {} };
-  const data = blocks.DataPts ? parseDataPts(r, blocks.DataPts, fxd) : null;
+    const r = new Reader(buf, 0);
+    const gen = blocks.GenParams ? parseGenParams(r, blocks.GenParams) : null;
+    const sup = blocks.SupParams ? parseSupParams(r, blocks.SupParams) : null;
+    const fxd = parseFxdParams(r, blocks.FxdParams, format);
+    const keyEvents = blocks.KeyEvents ? parseKeyEvents(r, blocks.KeyEvents, fxd, format) : { count: 0, events: [], summary: {} };
+    const data = blocks.DataPts ? parseDataPts(r, blocks.DataPts, fxd) : null;
 
-  let checksum = null;
-  if (blocks.Cksum) {
-    const crcPos = blocks.Cksum.dataStart;
-    const stored = buf.readUInt16LE(crcPos);
-    const calc = crc16ccitt(buf.subarray(0, crcPos));
-    checksum = { stored, calculated: calc, match: stored === calc };
+    let checksum = null;
+    if (blocks.Cksum) {
+      const crcPos = blocks.Cksum.dataStart;
+      if (crcPos + 2 > buf.length || crcPos + 2 > blocks.Cksum.start + blocks.Cksum.size) {
+        checksum = { stored: null, calculated: null, match: null, truncated: true };
+      } else {
+        const stored = buf.readUInt16LE(crcPos);
+        const calc = crc16ccitt(buf.subarray(0, crcPos));
+        checksum = { stored, calculated: calc, match: stored === calc, truncated: false };
+      }
+    }
+
+    return { format, map, gen, sup, fxd, events: keyEvents, data, checksum, blocks };
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`не удалось разобрать SOR: ${e.message}`);
   }
-
-  return { format, map, gen, sup, fxd, events: keyEvents, data, checksum, blocks };
 }
 
 export function summarize(sor, name = "") {

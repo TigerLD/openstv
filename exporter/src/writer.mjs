@@ -1,6 +1,10 @@
 // SOR writer: edit metadata blocks and rebuild the file with a fresh CRC.
 // Only v2 files are rewritten; block names and order are preserved.
 import { cp1251Decode, cp1251Encode } from "./cp1251.mjs";
+import { SorError } from "./sor.mjs";
+
+const MAX_POINTS = 5_000_000;
+const MAX_BLOCKS = 1024;
 
 function crc16ccitt(buf) {
   let crc = 0xffff;
@@ -38,36 +42,45 @@ function i32(v) {
 
 // Split a v2 file into Map metadata and ordered block bodies.
 function readBlocks(buf) {
-  let p = 0;
-  const readCstr = () => {
-    const start = p;
-    while (p < buf.length && buf[p] !== 0) p++;
-    const s = buf.toString("latin1", start, p);
-    p++;
-    return s;
-  };
-  const mapName = readCstr();
-  if (mapName !== "Map") throw new Error("only Bellcore 2.0 (Map) files are supported for writing");
-  const mapVersion = buf.readUInt16LE(p); p += 2;
-  const mapSize = buf.readUInt16LE(p); p += 2;
-  const unknown = buf.readUInt16LE(p); p += 2;
-  const count = buf.readUInt16LE(p); p += 2;
-  const entries = [];
-  for (let i = 0; i < count - 1; i++) {
-    const name = readCstr();
-    const version = buf.readUInt16LE(p); p += 2;
-    const size = buf.readUInt32LE(p); p += 4;
-    entries.push({ name, version, size });
+  try {
+    let p = 0;
+    const readCstr = () => {
+      const start = p;
+      while (p < buf.length && buf[p] !== 0) p++;
+      const s = buf.toString("latin1", start, p);
+      p++;
+      return s;
+    };
+    const mapName = readCstr();
+    if (mapName !== "Map") throw new SorError("запись поддерживается только для Bellcore 2.0 (блок Map)");
+    const mapVersion = buf.readUInt16LE(p); p += 2;
+    const mapSize = buf.readUInt16LE(p); p += 2;
+    const unknown = buf.readUInt16LE(p); p += 2;
+    const count = buf.readUInt16LE(p); p += 2;
+    if (mapSize < 12 || mapSize > buf.length) throw new SorError(`Map: некорректный размер ${mapSize}`);
+    if (count < 1 || count > MAX_BLOCKS) throw new SorError(`Map: некорректное число блоков ${count}`);
+    const entries = [];
+    for (let i = 0; i < count - 1; i++) {
+      const name = readCstr();
+      if (!name) throw new SorError("Map: пустое имя блока");
+      const version = buf.readUInt16LE(p); p += 2;
+      const size = buf.readUInt32LE(p); p += 4;
+      if (size < name.length + 1) throw new SorError(`Map: блок ${name} короче имени`);
+      entries.push({ name, version, size });
+    }
+    const bodies = [];
+    let off = mapSize;
+    for (const e of entries) {
+      if (off + e.size > buf.length) throw new SorError(`Map: блок ${e.name} выходит за конец файла`);
+      const body = buf.subarray(off, off + e.size);
+      bodies.push({ ...e, body });
+      off += e.size;
+    }
+    return { mapVersion, unknown, entries: bodies };
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`не удалось разобрать Map: ${e.message}`);
   }
-  // Bodies start at mapSize.
-  const bodies = [];
-  let off = mapSize;
-  for (const e of entries) {
-    const body = buf.subarray(off, off + e.size);
-    bodies.push({ ...e, body });
-    off += e.size;
-  }
-  return { mapVersion, unknown, entries: bodies };
 }
 
 function buildMap(mapVersion, unknown, blocks) {
@@ -82,6 +95,7 @@ function buildMap(mapVersion, unknown, blocks) {
   }
   const entriesBuf = Buffer.concat(entries);
   const size = 12 + entriesBuf.length;
+  if (size > 0xffff) throw new SorError(`Map: таблица блоков слишком большая (${size} байт)`);
   const sizeBuf = Buffer.alloc(2);
   sizeBuf.writeUInt16LE(size);
   return Buffer.concat([
@@ -92,6 +106,19 @@ function buildMap(mapVersion, unknown, blocks) {
     u16(blocks.length + 1),
     entriesBuf,
   ]);
+}
+
+// Cksum must be unique and last: the CRC covers every byte before it.
+function cksumIndex(blocks) {
+  const idx = [];
+  blocks.forEach((b, i) => {
+    if (b.name === "Cksum") idx.push(i);
+  });
+  if (idx.length > 1) throw new SorError("несколько блоков Cksum не поддерживаются");
+  if (idx.length === 1 && idx[0] !== blocks.length - 1) {
+    throw new SorError("блок Cksum должен быть последним");
+  }
+  return idx.length ? idx[0] : -1;
 }
 
 function patchFxd(data, { timestamp, ior }) {
@@ -164,7 +191,7 @@ const BODY_NAME = (buf) => {
  * @param {Buffer} buf original file
  * @param {object} edits {timestamp, ior, fiberId, cableId, operator, locationA, locationB, comment}
  */
-export function updateSor(buf, edits = {}) {
+function updateSorUnsafe(buf, edits = {}) {
   const parsed = readBlocks(buf);
   const blocks = parsed.entries.map((b) => {
     const { name, dataStart } = BODY_NAME(b.body);
@@ -182,6 +209,7 @@ export function updateSor(buf, edits = {}) {
 
   // Cksum body is "Cksum\0" + u16 crc; strip the old CRC and append a fresh one.
   let hasCksum = false;
+  cksumIndex(blocks);
   for (let i = 0; i < blocks.length; i++) {
     if (blocks[i].name === "Cksum") {
       const { dataStart } = BODY_NAME(blocks[i].body);
@@ -201,6 +229,15 @@ export function updateSor(buf, edits = {}) {
   return file;
 }
 
+export function updateSor(buf, edits = {}) {
+  try {
+    return updateSorUnsafe(buf, edits);
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`не удалось пересобрать SOR: ${e.message}`);
+  }
+}
+
 // ---- trace data and events (for cropping, denoising, event editing) ----
 
 export function readTraceData(buf) {
@@ -209,16 +246,26 @@ export function readTraceData(buf) {
   if (!block) return null;
   const { dataStart } = BODY_NAME(block.body);
   const data = block.body.subarray(dataStart);
+  if (data.length < 12) throw new SorError("DataPts: блок короче заголовка");
   const n = data.readUInt32LE(0);
   const numTraces = data.readInt16LE(4);
   const n2 = data.readUInt32LE(6);
   const scaleRaw = data.readUInt16LE(10);
+  if (numTraces !== 1) {
+    throw new SorError(`DataPts: ${numTraces} набора точек; запись поддерживает только один`);
+  }
+  if (n === 0 || n > MAX_POINTS) throw new SorError(`DataPts: некорректное число точек (${n})`);
+  if (n2 !== n) throw new SorError(`DataPts: n=${n} не совпадает с n2=${n2}`);
+  if (12 + n * 2 > data.length) throw new SorError("DataPts: массив точек выходит за пределы блока");
   const raw = new Uint16Array(n);
   for (let i = 0; i < n; i++) raw[i] = data.readUInt16LE(12 + i * 2);
   return { n, numTraces, n2, scaleRaw, raw, format: 2 };
 }
 
 function buildTraceData({ n, numTraces, n2, scaleRaw, raw }) {
+  if (!raw || n !== raw.length) throw new SorError("DataPts: n не совпадает с длиной массива");
+  if (numTraces !== 1) throw new SorError("DataPts: запись нескольких наборов не поддерживается");
+  if (n2 !== n) throw new SorError("DataPts: n2 должен совпадать с n");
   const head = Buffer.alloc(12);
   head.writeUInt32LE(n, 0);
   head.writeInt16LE(numTraces, 4);
@@ -236,6 +283,7 @@ export function readTraceEvents(buf) {
   const { dataStart } = BODY_NAME(block.body);
   const data = block.body.subarray(dataStart);
   const format = 2;
+  if (data.length < 2) throw new SorError("KeyEvents: блок короче заголовка");
   const count = data.readUInt16LE(0);
   let p = 2;
   const readCstr = () => {
@@ -246,7 +294,8 @@ export function readTraceEvents(buf) {
     return s;
   };
   const events = [];
-  for (let i = 0; i < count && p + 20 <= data.length; i++) {
+  for (let i = 0; i < count; i++) {
+    if (p + 22 > data.length) throw new SorError(`KeyEvents: событие ${i + 1} обрезано`);
     const ev = {
       number: data.readUInt16LE(p),
       distanceRaw: data.readUInt32LE(p + 2),
@@ -257,6 +306,7 @@ export function readTraceEvents(buf) {
     };
     p += 22;
     if (format === 2) {
+      if (p + 20 > data.length) throw new SorError(`KeyEvents: событие ${i + 1} обрезано (нет полей v2)`);
       ev.endOfPreviousRaw = data.readUInt32LE(p);
       ev.startOfCurrentRaw = data.readUInt32LE(p + 4);
       ev.endOfCurrentRaw = data.readUInt32LE(p + 8);
@@ -282,6 +332,8 @@ export function readTraceEvents(buf) {
 }
 
 function buildTraceEvents({ events, summary }, format) {
+  if (!Array.isArray(events)) throw new SorError("KeyEvents: список событий не задан");
+  if (events.length > 0xffff) throw new SorError("KeyEvents: слишком много событий");
   const parts = [u16(events.length)];
   for (const ev of events) {
     parts.push(u16(ev.number));
@@ -313,7 +365,7 @@ function buildTraceEvents({ events, summary }, format) {
  * @param {Buffer} buf original file
  * @param {{data?: object, events?: object}} patch
  */
-export function rewriteSor(buf, patch = {}) {
+function rewriteSorUnsafe(buf, patch = {}) {
   const parsed = readBlocks(buf);
   const format = 2;
   const blocks = parsed.entries.map((b) => {
@@ -353,6 +405,7 @@ export function rewriteSor(buf, patch = {}) {
   });
 
   let hasCksum = false;
+  cksumIndex(blocks);
   for (let i = 0; i < blocks.length; i++) {
     if (blocks[i].name === "Cksum") {
       const { dataStart } = BODY_NAME(blocks[i].body);
@@ -370,6 +423,15 @@ export function rewriteSor(buf, patch = {}) {
     file = Buffer.concat([file, crcBuf]);
   }
   return file;
+}
+
+export function rewriteSor(buf, patch = {}) {
+  try {
+    return rewriteSorUnsafe(buf, patch);
+  } catch (e) {
+    if (e instanceof SorError) throw e;
+    throw new SorError(`не удалось пересобрать SOR: ${e.message}`);
+  }
 }
 
 export function readMetadata(buf) {

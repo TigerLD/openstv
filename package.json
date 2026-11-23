@@ -1,0 +1,14 @@
+{
+  "name": "openstv-repo",
+  "private": true,
+  "type": "module",
+  "description": "OpenSTV — OTDR trace viewer and batch processor",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "fixtures": "node tests/make-fixtures.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
