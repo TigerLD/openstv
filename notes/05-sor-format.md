@@ -1,7 +1,7 @@
 # 05 — Формат SOR: что реально в файлах
 
-Разобрано на `samples/cross-1_032.sor` и `cross-1_1310_033.sor`
-(Bellcore 2.0, прибор S/N 6000113400, ПО 1.00.39).
+Разобрано на обезличенных образцах SOR (Bellcore 2.0). Реальные файлы приборов
+в репозиторий не входят.
 
 ## Общая структура (v2)
 
@@ -34,7 +34,7 @@ body  = name\0 | data...
 | build condition | 2 байта | `NC` |
 | user offset | i32 | 0 |
 | user offset distance | i32 | 0 |
-| operator | cstr | `Lupanov D.V.` |
+| operator | cstr | `Test Operator` |
 | comment | cstr | |
 
 ## FxdParams
