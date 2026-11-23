@@ -21,7 +21,7 @@ import {
 } from "./src/core.mjs";
 import { openBrowserUrl, startGui } from "./src/gui.mjs";
 
-const VERSION = "1.3.2";
+const VERSION = "1.3.3";
 
 const HELP = `OpenSTV ${VERSION} — пакетный экспорт и обработка OTDR-трасс (SOR/Bellcore)
 

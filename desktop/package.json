@@ -1,6 +1,6 @@
 {
   "name": "openstv-desktop",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
   "description": "OpenSTV — пакетная обработка OTDR-трасс (SOR)",
   "author": "OpenSTV",

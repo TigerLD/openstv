@@ -20,7 +20,7 @@ import { parseSor } from "./sor.mjs";
 import { toModel } from "./model.mjs";
 import { readTraceData, readTraceEvents, rewriteSor, updateSor } from "./writer.mjs";
 
-const VERSION = "1.3.2";
+const VERSION = "1.3.3";
 const SOL_KM_PER_US = 0.299792458;
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_FILES = 1000;
