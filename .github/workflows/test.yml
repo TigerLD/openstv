@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: exporter/package-lock.json
+      - run: npm ci --prefix exporter --ignore-scripts --no-audit --no-fund
+      - run: node tests/make-fixtures.mjs
+      - run: npm test
+
+  build-windows:
+    name: build Windows executables
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: exporter/package-lock.json
+      - run: npm ci --prefix exporter --ignore-scripts --no-audit --no-fund
+      - run: node exporter/build.mjs
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          Get-FileHash exporter/dist/OpenSTV.exe, exporter/dist/OpenSTV-cli.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path)" } |
+            Set-Content exporter/dist/SHA256SUMS.txt
+          Get-Content exporter/dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenSTV-windows
+          path: |
+            exporter/dist/OpenSTV.exe
+            exporter/dist/OpenSTV-cli.exe
+            exporter/dist/SHA256SUMS.txt

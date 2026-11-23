@@ -94,7 +94,7 @@ export function buildProtocol(models, opts = {}) {
   const kind = KINDS[opts.kind] ? opts.kind : "rd-4";
   const spec = KINDS[kind];
   const date = opts.date || fmtDate(new Date());
-  const normPerKm = Number(opts.normPerKm) > 0 ? Number(opts.normPerKm) : 0.35;
+  const normPerKm = Number(opts.normPerKm) > 0 ? Number(opts.normPerKm) : null;
   const instrument = models.length
     ? [models[0].sup.supplier, models[0].sup.otdr]
         .map((v) => String(v ?? "").trim())
@@ -106,20 +106,20 @@ export function buildProtocol(models, opts = {}) {
   models.forEach((m, i) => {
     const km = m.rangeM / 1000;
     const loss = totalLoss(m);
-    const norm = normPerKm * km;
-    const ok = loss <= norm + 1e-6;
+    const norm = normPerKm == null ? null : normPerKm * km;
+    const verdict = norm == null ? "норма не задана" : loss <= norm + 1e-6 ? "годен" : "не годен";
     if (kind === "rd-6") {
       const refl = minReflection(m);
       rows.push(`<tr>
 <td>${i + 1}</td><td>${esc(m.gen.fiberId)}</td><td>${km.toFixed(3)}</td>
 <td>${m.events.length}</td><td>${loss.toFixed(2)}</td>
 <td>${refl == null ? "—" : refl.toFixed(1)}</td>
-<td>${ok ? "годен" : "не годен"}</td></tr>`);
+<td>${verdict}</td></tr>`);
     } else {
       rows.push(`<tr>
 <td>${i + 1}</td><td>${esc(m.gen.fiberId)}</td><td>${km.toFixed(3)}</td>
-<td>${loss.toFixed(2)}</td><td>${norm.toFixed(2)}</td>
-<td>${ok ? "годен" : "не годен"}</td></tr>`);
+<td>${loss.toFixed(2)}</td><td>${norm == null ? "—" : norm.toFixed(2)}</td>
+<td>${verdict}</td></tr>`);
     }
   });
 
@@ -172,7 +172,9 @@ ${traceSvg(m)}
 ${header({ org: opts.org, object: opts.object, cable: opts.cable, date, instrument })}
 <table class="grid"><thead><tr>${spec.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
 <tbody>${rows.join("") || `<tr><td colspan="${spec.columns.length}">нет данных</td></tr>`}</tbody></table>
-<div class="note">Норма затухания принята ${normPerKm.toFixed(2)} дБ/км; при необходимости скорректируйте её в документе.
+<div class="note">${normPerKm == null
+  ? "Норма затухания не задана. Укажите её по действующему нормативному документу перед печатью."
+  : `Норма затухания принята ${normPerKm.toFixed(2)} дБ/км; проверьте её по действующему документу.`}
 Затухание волокна рассчитано как сумма потерь на событиях (без первого события — разъёма).</div>
 ${details}
 ${signatures()}
